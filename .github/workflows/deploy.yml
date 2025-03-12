@@ -50,6 +50,18 @@ jobs:
         echo "AZURE_RESOURCE_GROUP=${{ secrets.AZURE_RESOURCE_GROUP }}" >> .env
         echo "AZURE_STORAGE_ACCOUNT=${{ secrets.AZURE_STORAGE_ACCOUNT }}" >> .env
         echo "AZURE_CONTAINER_NAME=${{ secrets.AZURE_CONTAINER_NAME }}" >> .env
+        echo "ERC20_CONTRACT_ADDRESS=${{ secrets.ERC20_CONTRACT_ADDRESS }}" >> .env
+        echo "ERC721_CONTRACT_ADDRESS=${{ secrets.ERC721_CONTRACT_ADDRESS }}" >> .env
+        echo "ERC777_CONTRACT_ADDRESS=${{ secrets.ERC777_CONTRACT_ADDRESS }}" >> .env
+        echo "ERC1155_CONTRACT_ADDRESS=${{ secrets.ERC1155_CONTRACT_ADDRESS }}" >> .env
+        echo "ERC2535_CONTRACT_ADDRESS=${{ secrets.ERC2535_CONTRACT_ADDRESS }}" >> .env
+        echo "ISO20022_CONTRACT_ADDRESS=${{ secrets.ISO20022_CONTRACT_ADDRESS }}" >> .env
+        echo "ISO4217_CONTRACT_ADDRESS=${{ secrets.ISO4217_CONTRACT_ADDRESS }}" >> .env
+        echo "ISO3166_CONTRACT_ADDRESS=${{ secrets.ISO3166_CONTRACT_ADDRESS }}" >> .env
+        echo "INTERNATIONALIZATION_CONTRACT_ADDRESS=${{ secrets.INTERNATIONALIZATION_CONTRACT_ADDRESS }}" >> .env
+        echo "TRANSFER_CONTRACT_ADDRESS=${{ secrets.TRANSFER_CONTRACT_ADDRESS }}" >> .env
+        echo "FINANCIAL_TRANSACTIONS_CONTRACT_ADDRESS=${{ secrets.FINANCIAL_TRANSACTIONS_CONTRACT_ADDRESS }}" >> .env
+        echo "COMMERCE_CONTRACT_ADDRESS=${{ secrets.COMMERCE_CONTRACT_ADDRESS }}" >> .env
 
     - name: Log in to Azure CLI
       uses: azure/login@v1

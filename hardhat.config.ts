@@ -1,7 +1,7 @@
 import { HardhatUserConfig } from "hardhat/config";
 import "@nomicfoundation/hardhat-toolbox";
-
 require('dotenv').config();
+import "@typechain/hardhat";
 
 const config: HardhatUserConfig = {
   solidity: {

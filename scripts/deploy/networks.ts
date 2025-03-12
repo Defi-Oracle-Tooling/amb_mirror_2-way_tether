@@ -1,59 +1,116 @@
-import { NetworkConfig } from "../../src/admin-panel/types/config";
+import { ethers } from "ethers";
+import { ChainConfig } from "../../src/admin-panel/types/BridgeAdmin";
+import { validateChainConnection } from "./validateConfig";
 
-export const networks: { [key: string]: NetworkConfig } = {
-    ethereum: {
-        chainId: 1,
-        rpcUrl: process.env.ETH_RPC_URL || "",
-        name: "Ethereum Mainnet",
-        explorerUrl: "https://etherscan.io",
-        isSource: true,
-        isTarget: true,
-        requiredConfirmations: 12
-    },
-    polygon: {
-        chainId: 137,
-        rpcUrl: process.env.POLYGON_RPC_URL || "",
-        name: "Polygon Mainnet",
-        explorerUrl: "https://polygonscan.com",
-        isSource: true,
-        isTarget: true,
-        requiredConfirmations: 256
-    },
-    arbitrum: {
-        chainId: 42161,
-        rpcUrl: process.env.ARBITRUM_RPC_URL || "",
-        name: "Arbitrum One",
-        explorerUrl: "https://arbiscan.io",
-        isSource: true,
-        isTarget: true,
-        requiredConfirmations: 64
-    },
-    optimism: {
-        chainId: 10,
-        rpcUrl: process.env.OPTIMISM_RPC_URL || "",
-        name: "Optimism",
-        explorerUrl: "https://optimistic.etherscan.io",
-        isSource: true,
-        isTarget: true,
-        requiredConfirmations: 50
-    },
-    // Test networks
-    goerli: {
-        chainId: 5,
-        rpcUrl: process.env.GOERLI_RPC_URL || "",
-        name: "Goerli Testnet",
-        explorerUrl: "https://goerli.etherscan.io",
-        isSource: true,
-        isTarget: true,
-        requiredConfirmations: 6
-    },
-    mumbai: {
-        chainId: 80001,
-        rpcUrl: process.env.MUMBAI_RPC_URL || "",
-        name: "Polygon Mumbai",
-        explorerUrl: "https://mumbai.polygonscan.com",
-        isSource: true,
-        isTarget: true,
-        requiredConfirmations: 12
+export class NetworkManager {
+    private providers: Map<number, ethers.JsonRpcProvider> = new Map();
+    private configs: Map<number, ChainConfig> = new Map();
+
+    async initializeNetworks(chains: ChainConfig[]): Promise<void> {
+        for (const chain of chains) {
+            // Validate chain connection first
+            await validateChainConnection(chain.chainId, chain.rpcUrl);
+            
+            // Create and store provider
+            const provider = new ethers.JsonRpcProvider(chain.rpcUrl);
+            this.providers.set(chain.chainId, provider);
+            this.configs.set(chain.chainId, chain);
+        }
     }
-};
+
+    getProvider(chainId: number): ethers.JsonRpcProvider {
+        const provider = this.providers.get(chainId);
+        if (!provider) {
+            throw new Error(`No provider configured for chain ${chainId}`);
+        }
+        return provider;
+    }
+
+    getChainConfig(chainId: number): ChainConfig {
+        const config = this.configs.get(chainId);
+        if (!config) {
+            throw new Error(`No configuration found for chain ${chainId}`);
+        }
+        return config;
+    }
+
+    async verifyChainConnections(): Promise<boolean> {
+        const verifications = Array.from(this.providers.entries()).map(
+            async ([chainId, provider]) => {
+                try {
+                    const network = await provider.getNetwork();
+                    if (network.chainId !== BigInt(chainId)) {
+                        throw new Error(`Chain ID mismatch for ${chainId}`);
+                    }
+                    return true;
+                } catch (err) {
+                    const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+                    throw new Error(`Failed to verify chain ${chainId}: ${errorMessage}`);
+                }
+            }
+        );
+
+        await Promise.all(verifications);
+        return true;
+    }
+
+    async deployBridgeContracts(
+        governanceFactory: ethers.ContractFactory,
+        bridgeFactory: ethers.ContractFactory,
+        signer: ethers.Signer
+    ): Promise<Map<number, { governance: string; bridge: string }>> {
+        const deployments = new Map<number, { governance: string; bridge: string }>();
+
+        for (const [chainId, provider] of this.providers) {
+            const connectedSigner = signer.connect(provider);
+            
+            // Deploy governance first
+            const governance = await governanceFactory.connect(connectedSigner).deploy();
+            await governance.waitForDeployment();
+            const governanceAddress = await governance.getAddress();
+
+            // Deploy bridge with governance address
+            const bridge = await bridgeFactory.connect(connectedSigner).deploy(governanceAddress);
+            await bridge.waitForDeployment();
+            const bridgeAddress = await bridge.getAddress();
+
+            deployments.set(chainId, {
+                governance: governanceAddress,
+                bridge: bridgeAddress
+            });
+        }
+
+        return deployments;
+    }
+
+    async configureBridgeContracts(
+        deployments: Map<number, { governance: string; bridge: string }>,
+        signer: ethers.Signer,
+        bridgeABI: ethers.InterfaceAbi,
+        governanceABI: ethers.InterfaceAbi
+    ): Promise<void> {
+        const chainIds = Array.from(deployments.keys());
+        
+        for (const sourceChainId of chainIds) {
+            const sourceProvider = this.getProvider(sourceChainId);
+            const sourceContracts = deployments.get(sourceChainId);
+            if (!sourceContracts) continue;
+
+            const bridge = new ethers.Contract(
+                sourceContracts.bridge,
+                bridgeABI,
+                signer.connect(sourceProvider)
+            );
+
+            // Enable CROSS_CHAIN_MIRROR feature
+            await bridge.toggleFeature("CROSS_CHAIN_MIRROR", true);
+
+            // Enable connections to all other chains
+            for (const targetChainId of chainIds) {
+                if (targetChainId !== sourceChainId) {
+                    await bridge.updateSupportedChain(targetChainId, true);
+                }
+            }
+        }
+    }
+}

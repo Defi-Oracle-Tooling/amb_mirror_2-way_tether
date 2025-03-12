@@ -1,128 +1,160 @@
-import { networks } from './networks';
-import { BridgeConfig, MonitoringConfig, RetryConfig } from '../../src/admin-panel/types/config';
-import dotenv from 'dotenv';
+import { ethers } from "ethers";
+import { BridgeConfig, ChainConfig, BridgeFeature, BridgeRole } from "../../src/admin-panel/types/BridgeAdmin";
+import { validateBridgeConfig } from "./validateConfig";
+import { ContractFactory } from "ethers";
 
-dotenv.config();
-
-const defaultMonitoringConfig: MonitoringConfig = {
-    alertThresholds: {
-        transactionDelay: 300000, // 5 minutes
-        signatureDelay: 180000,   // 3 minutes
-        errorRate: 5,             // 5%
-        blockConfirmations: 12,
-        crossChainLatency: 600000 // 10 minutes
-    },
-    healthCheckInterval: 30000,   // 30 seconds
-    alertEndpoints: [
-        {
-            url: process.env.SLACK_WEBHOOK_URL || "",
-            type: "slack",
-            severity: ["error", "critical"]
-        },
-        {
-            url: process.env.EMAIL_WEBHOOK_URL || "",
-            type: "email",
-            severity: ["critical"]
-        }
-    ]
-};
-
-const defaultRetryConfig: RetryConfig = {
-    maxAttempts: 3,
-    initialDelay: 1000,
-    maxDelay: 10000,
-    backoffFactor: 2
-};
-
-export interface DeploymentConfig {
-    environment: 'local' | 'testnet' | 'mainnet';
-    sourceNetworks: string[];
-    targetNetworks: string[];
-    initialAdmins: string[];
-    initialOperators: string[];
-    initialGuardians: string[];
-    requiredSignatures: number;
-    verifyContracts: boolean;
-}
-
-const deploymentConfigs: { [key: string]: DeploymentConfig } = {
-    local: {
-        environment: 'local',
-        sourceNetworks: [],
-        targetNetworks: [],
-        initialAdmins: [],
-        initialOperators: [],
-        initialGuardians: [],
-        requiredSignatures: 1,
-        verifyContracts: false
-    },
-    testnet: {
-        environment: 'testnet',
-        sourceNetworks: ['goerli', 'mumbai'],
-        targetNetworks: ['goerli', 'mumbai'],
-        initialAdmins: process.env.TESTNET_ADMINS?.split(',') || [],
-        initialOperators: process.env.TESTNET_OPERATORS?.split(',') || [],
-        initialGuardians: process.env.TESTNET_GUARDIANS?.split(',') || [],
-        requiredSignatures: 2,
-        verifyContracts: true
-    },
-    mainnet: {
-        environment: 'mainnet',
-        sourceNetworks: ['ethereum', 'polygon', 'arbitrum', 'optimism'],
-        targetNetworks: ['ethereum', 'polygon', 'arbitrum', 'optimism'],
-        initialAdmins: process.env.MAINNET_ADMINS?.split(',') || [],
-        initialOperators: process.env.MAINNET_OPERATORS?.split(',') || [],
-        initialGuardians: process.env.MAINNET_GUARDIANS?.split(',') || [],
-        requiredSignatures: 3,
-        verifyContracts: true
+export function loadConfig(environment: string): BridgeConfig {
+    let config: BridgeConfig;
+    
+    try {
+        config = require(`../../config/${environment}.json`);
+    } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+        throw new Error(`Failed to load config for environment ${environment}: ${errorMessage}`);
     }
-};
 
-export function getDeploymentConfig(environment: string): DeploymentConfig {
-    const config = deploymentConfigs[environment];
-    if (!config) {
-        throw new Error(`Invalid environment: ${environment}`);
-    }
+    // Validate the loaded configuration
+    validateBridgeConfig(config);
     return config;
 }
 
-export function generateBridgeConfig(deployConfig: DeploymentConfig): BridgeConfig {
+export function getDefaultFeatures(): BridgeFeature[] {
+    return [
+        {
+            name: "CROSS_CHAIN_MIRROR",
+            enabled: false,
+            description: "Enables cross-chain transaction mirroring",
+            requiredRole: BridgeRole.OPERATOR
+        },
+        {
+            name: "EMERGENCY_SHUTDOWN",
+            enabled: false,
+            description: "Allows emergency shutdown of bridge operations",
+            requiredRole: BridgeRole.GUARDIAN
+        },
+        {
+            name: "ROLE_MANAGEMENT",
+            enabled: false,
+            description: "Enables role assignment and management",
+            requiredRole: BridgeRole.ADMIN
+        }
+    ];
+}
+
+export function generateTestnetConfig(
+    localRpcUrl: string = "http://localhost:8545"
+): BridgeConfig {
+    const testChains: ChainConfig[] = [
+        {
+            chainId: 31337, // Hardhat's default chain ID
+            name: "Local Testnet 1",
+            isSupported: true,
+            rpcUrl: localRpcUrl
+        },
+        {
+            chainId: 31338,
+            name: "Local Testnet 2",
+            isSupported: true,
+            rpcUrl: localRpcUrl.replace("8545", "8546") // Assuming second chain on different port
+        }
+    ];
+
     return {
-        sourceNetworks: deployConfig.sourceNetworks.map(name => networks[name]),
-        targetNetworks: deployConfig.targetNetworks.map(name => networks[name]),
-        features: [],
-        admins: deployConfig.initialAdmins,
-        operators: deployConfig.initialOperators,
-        guardians: deployConfig.initialGuardians,
-        requiredSignatures: deployConfig.requiredSignatures,
-        monitoring: defaultMonitoringConfig,
-        retry: defaultRetryConfig
+        features: getDefaultFeatures(),
+        chains: testChains,
+        governance: {
+            threshold: 1, // Single signature for testing
+            minDelay: 0, // No delay for testing
+            guardianDelay: 0
+        },
+        monitoring: {
+            errorThreshold: 3,
+            alertInterval: 1000,
+            maxRetries: 3
+        }
     };
 }
 
-export function validateDeploymentConfig(config: DeploymentConfig): void {
-    if (config.initialAdmins.length === 0) {
-        throw new Error("No initial admins configured");
+export async function deployTestEnvironment(
+    config: BridgeConfig,
+    deployer: ethers.Signer
+): Promise<{
+    bridges: Map<number, string>,
+    governance: Map<number, string>
+}> {
+    const deployments = {
+        bridges: new Map<number, string>(),
+        governance: new Map<number, string>()
+    };
+
+    for (const chain of config.chains) {
+        // Deploy Governance using ContractFactory
+        const governanceFactory = new ContractFactory(
+            ["..."], // ABI will be loaded from artifacts
+            "...",   // Bytecode will be loaded from artifacts
+            deployer
+        );
+        const governance = await governanceFactory.deploy();
+        await governance.waitForDeployment();
+        const governanceAddress = await governance.getAddress();
+
+        // Deploy Bridge with governance address
+        const bridgeFactory = new ContractFactory(
+            ["..."], // ABI will be loaded from artifacts
+            "...",   // Bytecode will be loaded from artifacts
+            deployer
+        );
+        const bridge = await bridgeFactory.deploy(governanceAddress);
+        await bridge.waitForDeployment();
+        const bridgeAddress = await bridge.getAddress();
+
+        deployments.bridges.set(chain.chainId, bridgeAddress);
+        deployments.governance.set(chain.chainId, governanceAddress);
+
+        // Initialize governance
+        const governanceContract = governanceFactory.attach(governanceAddress);
+        await governanceContract.updateThreshold(config.governance.threshold);
+
+        // Enable features
+        const bridgeContract = bridgeFactory.attach(bridgeAddress);
+        for (const feature of config.features) {
+            if (feature.enabled) {
+                await bridgeContract.toggleFeature(feature.name, true);
+            }
+        }
     }
 
-    if (config.requiredSignatures > config.initialAdmins.length) {
-        throw new Error("Required signatures cannot be greater than number of admins");
-    }
-
-    const invalidNetworks = [
-        ...config.sourceNetworks.filter(name => !networks[name]),
-        ...config.targetNetworks.filter(name => !networks[name])
-    ];
-
-    if (invalidNetworks.length > 0) {
-        throw new Error(`Invalid networks configured: ${invalidNetworks.join(", ")}`);
-    }
+    return deployments;
 }
 
-export function getNetworkConfig(networkName: string) {
-    const config = networks[networkName];
-    if (!config) {
-        throw new Error(`Network configuration not found for: ${networkName}`);
+export async function setupCrossChainConnections(
+    config: BridgeConfig,
+    deployments: {
+        bridges: Map<number, string>,
+        governance: Map<number, string>
+    },
+    deployer: ethers.Signer
+): Promise<void> {
+    const bridgeFactory = new ContractFactory(
+        ["..."], // ABI will be loaded from artifacts
+        "...",   // Bytecode will be loaded from artifacts
+        deployer
+    );
+
+    for (const sourceChain of config.chains) {
+        const bridgeAddress = deployments.bridges.get(sourceChain.chainId);
+        if (!bridgeAddress) continue;
+
+        const bridge = bridgeFactory.attach(bridgeAddress);
+
+        // Enable connections to all other chains
+        for (const targetChain of config.chains) {
+            if (targetChain.chainId !== sourceChain.chainId) {
+                await bridge.updateSupportedChain(
+                    targetChain.chainId,
+                    targetChain.isSupported
+                );
+            }
+        }
     }
-    return config;
 }

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.20;
 
 import "../interfaces/IBridgeMirror.sol";
 import "../interfaces/IBridgeGovernance.sol";
 import "../core/BridgeErrors.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 contract BridgeMirror is IBridgeMirror, ReentrancyGuard, Pausable {
@@ -28,7 +28,7 @@ contract BridgeMirror is IBridgeMirror, ReentrancyGuard, Pausable {
     }
 
     modifier onlyAdmin() {
-        if (!governance.hasRole(msg.sender, IBridgeGovernance.Role.ADMIN)) {
+        if (msg.sender != address(governance) && !governance.hasRole(msg.sender, IBridgeGovernance.Role.ADMIN)) {
             revert BridgeErrors.UnauthorizedRole(msg.sender, uint8(IBridgeGovernance.Role.ADMIN));
         }
         _;

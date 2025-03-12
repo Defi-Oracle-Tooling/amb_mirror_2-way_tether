@@ -1,139 +1,123 @@
-import { ethers, network, run } from "hardhat";
-import {
-    getDeploymentConfig,
-    validateDeploymentConfig,
-    generateBridgeConfig,
-    getNetworkConfig
-} from "./config";
-import fs from "fs";
-import path from "path";
-import { BridgeGovernance, BridgeMirror } from "../../typechain-types";
-import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
+import { ethers } from "ethers";
+import { MonitoringService } from "../../src/utils/MonitoringService";
+import { NetworkManager } from "./networks";
+import { loadConfig, deployTestEnvironment, setupCrossChainConnections } from "./config";
+import { BridgeService } from "../../src/services/BridgeService";
+import fs from 'fs';
+import path from 'path';
 
-interface DeploymentResult {
-    network: string;
-    chainId: number;
-    governance: string;
-    bridge: string;
-    timestamp: number;
-}
+// Load contract artifacts
+const loadContractArtifact = (contractName: string) => {
+    const artifactPath = path.join(__dirname, `../../artifacts/contracts/${contractName}.sol/${contractName}.json`);
+    const artifactContent = fs.readFileSync(artifactPath, 'utf-8');
+    return JSON.parse(artifactContent);
+};
 
 async function main() {
-    // Get deployment environment from command line or default to local
-    const environment = process.env.DEPLOY_ENV || "local";
-    console.log(`Deploying to ${environment} environment`);
-
-    // Load and validate configuration
-    const deployConfig = getDeploymentConfig(environment);
-    validateDeploymentConfig(deployConfig);
-    const bridgeConfig = generateBridgeConfig(deployConfig);
-
-    // Verify we're on a supported network
-    const networkName = network.name;
-    if (!deployConfig.sourceNetworks.includes(networkName) && 
-        !deployConfig.targetNetworks.includes(networkName)) {
-        throw new Error(`Network ${networkName} is not configured for ${environment}`);
-    }
-
-    const [deployer] = await ethers.getSigners() as [HardhatEthersSigner];
-    console.log(`Deploying contracts with account: ${deployer.address}`);
-    console.log(`Account balance: ${ethers.formatEther(await ethers.provider.getBalance(deployer.address))}`);
-
     try {
-        // Deploy Governance contract
-        console.log("Deploying BridgeGovernance...");
-        const BridgeGovernanceFactory = await ethers.getContractFactory("BridgeGovernance");
-        const governance = await BridgeGovernanceFactory.deploy() as BridgeGovernance;
-        await governance.waitForDeployment();
-        const governanceAddress = await governance.getAddress();
-        console.log("BridgeGovernance deployed to:", governanceAddress);
-
-        // Deploy Bridge contract
-        console.log("Deploying BridgeMirror...");
-        const BridgeMirrorFactory = await ethers.getContractFactory("BridgeMirror");
-        const bridge = await BridgeMirrorFactory.deploy(governanceAddress) as BridgeMirror;
-        await bridge.waitForDeployment();
-        const bridgeAddress = await bridge.getAddress();
-        console.log("BridgeMirror deployed to:", bridgeAddress);
-
-        // Initialize roles
-        console.log("Initializing roles and configuration...");
+        // Get deployment environment from args or default to local
+        const environment = process.env.DEPLOY_ENV || 'local';
         
-        // Setup admins
-        for (const admin of deployConfig.initialAdmins) {
-            const tx = await governance.assignRole(admin, 2); // ADMIN_ROLE = 2
-            await tx.wait();
-            console.log(`Assigned admin role to ${admin}`);
+        // Initialize services
+        const config = loadConfig(environment);
+        const monitoring = new MonitoringService();
+        const networkManager = new NetworkManager();
+
+        // Setup network connections
+        await networkManager.initializeNetworks(config.chains);
+        await networkManager.verifyChainConnections();
+
+        // Load contract artifacts
+        const bridgeArtifact = loadContractArtifact('BridgeMirror');
+        const governanceArtifact = loadContractArtifact('BridgeGovernance');
+
+        // Create contract factories
+        const provider = networkManager.getProvider(config.chains[0].chainId); // Use first chain for deployment
+        const wallet = new ethers.Wallet(process.env.PRIVATE_KEY || '', provider);
+        
+        const bridgeFactory = new ethers.ContractFactory(
+            bridgeArtifact.abi,
+            bridgeArtifact.bytecode,
+            wallet
+        );
+        
+        const governanceFactory = new ethers.ContractFactory(
+            governanceArtifact.abi,
+            governanceArtifact.bytecode,
+            wallet
+        );
+
+        // Deploy contracts
+        const deployments = await networkManager.deployBridgeContracts(
+            governanceFactory,
+            bridgeFactory,
+            wallet
+        );
+        
+        // Setup cross-chain connections
+        await networkManager.configureBridgeContracts(
+            deployments,
+            wallet,
+            bridgeArtifact.abi,
+            governanceArtifact.abi
+        );
+
+        // Initialize bridge services
+        const bridgeServices = new Map<number, BridgeService>();
+        
+        for (const chain of config.chains) {
+            const addresses = deployments.get(chain.chainId);
+            if (!addresses) {
+                throw new Error(`Missing deployment for chain ${chain.chainId}`);
+            }
+
+            const provider = networkManager.getProvider(chain.chainId);
+            const bridge = new ethers.Contract(
+                addresses.bridge,
+                bridgeArtifact.abi,
+                provider
+            );
+            
+            const governance = new ethers.Contract(
+                addresses.governance,
+                governanceArtifact.abi,
+                provider
+            );
+
+            bridgeServices.set(
+                chain.chainId,
+                new BridgeService(bridge, governance, monitoring)
+            );
         }
 
-        // Setup operators
-        for (const operator of deployConfig.initialOperators) {
-            const tx = await governance.assignRole(operator, 1); // OPERATOR_ROLE = 1
-            await tx.wait();
-            console.log(`Assigned operator role to ${operator}`);
-        }
-
-        // Setup guardians
-        for (const guardian of deployConfig.initialGuardians) {
-            const tx = await governance.assignRole(guardian, 3); // GUARDIAN_ROLE = 3
-            await tx.wait();
-            console.log(`Assigned guardian role to ${guardian}`);
-        }
-
-        // Set signature threshold
-        await governance.updateThreshold(deployConfig.requiredSignatures);
-        console.log(`Set signature threshold to ${deployConfig.requiredSignatures}`);
-
-        // Store deployment result
-        const result: DeploymentResult = {
-            network: networkName,
-            chainId: network.config.chainId!,
-            governance: governanceAddress,
-            bridge: bridgeAddress,
-            timestamp: Date.now()
-        };
-
-        // Save deployment information
-        const deploymentDir = path.join(__dirname, '../../deployments', environment);
+        // Create deployment directory if it doesn't exist
+        const deploymentDir = path.join(__dirname, `../../deployments/${environment}`);
         if (!fs.existsSync(deploymentDir)) {
             fs.mkdirSync(deploymentDir, { recursive: true });
         }
-        
+
+        // Save deployment info
+        const deploymentInfo = {
+            environment,
+            timestamp: new Date().toISOString(),
+            deployer: wallet.address,
+            deployments: Object.fromEntries(deployments),
+            chains: config.chains
+        };
+
         fs.writeFileSync(
-            path.join(deploymentDir, `${networkName}.json`),
-            JSON.stringify(result, null, 2)
+            path.join(deploymentDir, 'deployment.json'),
+            JSON.stringify(deploymentInfo, null, 2)
         );
 
-        // Verify contracts if configured
-        if (deployConfig.verifyContracts && network.name !== "hardhat" && network.name !== "localhost") {
-            console.log("Verifying contracts...");
-            
-            try {
-                await run("verify:verify", {
-                    address: governanceAddress,
-                    constructorArguments: []
-                });
-                console.log("BridgeGovernance verified");
-            } catch (error) {
-                console.error("Error verifying BridgeGovernance:", error);
-            }
+        console.log("Deployment completed successfully");
+        console.log("Deployments:", {
+            chains: Object.fromEntries(deployments)
+        });
 
-            try {
-                await run("verify:verify", {
-                    address: bridgeAddress,
-                    constructorArguments: [governanceAddress]
-                });
-                console.log("BridgeMirror verified");
-            } catch (error) {
-                console.error("Error verifying BridgeMirror:", error);
-            }
-        }
-
-        console.log("Deployment completed successfully!");
-        return result;
-
-    } catch (error) {
-        console.error("Deployment failed:", error);
+    } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+        console.error("Deployment failed:", errorMessage);
         process.exit(1);
     }
 }

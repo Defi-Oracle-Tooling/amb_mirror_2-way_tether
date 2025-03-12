@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.20;
 
 import "../interfaces/IBridgeGovernance.sol";
 import "../core/BridgeErrors.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
-import "@openzeppelin/contracts/security/Pausable.sol";
 
 contract BridgeGovernance is IBridgeGovernance, ReentrancyGuard, Pausable {
     struct Transaction {
@@ -164,7 +164,7 @@ contract BridgeGovernance is IBridgeGovernance, ReentrancyGuard, Pausable {
             revert BridgeErrors.InvalidTransactionData(bytes32(0), "Invalid target");
         }
         
-        bytes32 txHash = keccak256(abi.encodePacked(target, value, data, block.number));
+        bytes32 txHash = keccak256(abi.encode(target, value, data));
         if (transactions[txHash].target != address(0)) {
             revert BridgeErrors.TransactionAlreadyProcessed(txHash);
         }

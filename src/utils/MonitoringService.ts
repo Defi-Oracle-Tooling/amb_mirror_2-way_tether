@@ -1,194 +1,147 @@
-import { EventEmitter } from 'events';
-import { ethers } from 'ethers';
-
 export enum AlertLevel {
-    INFO = 'info',
-    WARNING = 'warning',
-    ERROR = 'error',
-    CRITICAL = 'critical'
+    INFO = "INFO",
+    WARNING = "WARNING",
+    ERROR = "ERROR",
+    CRITICAL = "CRITICAL"
 }
 
-export interface Alert {
+export type TransactionLog = {
+    hash: string;
+    type: string;
+    timestamp: number;
+    metadata: Record<string, any>;
+};
+
+export type AlertConfig = {
     level: AlertLevel;
     message: string;
-    timestamp: Date;
-    data?: any;
-}
+    metadata?: Record<string, any>;
+    callback?: (alert: Alert) => Promise<void>;
+};
 
-export interface MonitoringConfig {
-    alertThresholds: {
-        transactionDelay: number;
-        signatureDelay: number;
-        errorRate: number;
-        blockConfirmations: number;
-        crossChainLatency: number;
-    };
-    healthCheckInterval: number;
-}
+export type Alert = AlertConfig & {
+    id: string;
+    timestamp: number;
+};
 
-export interface BridgeMetrics {
-    totalTransactions: number;
-    successfulTransactions: number;
-    failedTransactions: number;
-    averageLatency: number;
-    pendingTransactions: number;
-    chainHealth: Map<number, boolean>;
-}
+export class MonitoringService {
+    private txLogs: TransactionLog[] = [];
+    private alerts: Alert[] = [];
+    private alertCallbacks: ((alert: Alert) => Promise<void>)[] = [];
 
-export class MonitoringService extends EventEmitter {
-    private config: MonitoringConfig;
-    private providers: Map<number, ethers.Provider>;
-    private lastHealthCheck: Date;
-    private alertHistory: Alert[];
-    private metrics: BridgeMetrics;
-    private transactionTimestamps: Map<string, number>;
+    constructor() {
+        // Initialize with default error handler
+        this.addAlertCallback(async (alert) => {
+            if (alert.level === AlertLevel.CRITICAL) {
+                console.error(`CRITICAL ALERT: ${alert.message}`, alert.metadata);
+            }
+        });
+    }
 
-    constructor(config: MonitoringConfig) {
-        super();
-        this.config = config;
-        this.providers = new Map();
-        this.alertHistory = [];
-        this.lastHealthCheck = new Date();
-        this.transactionTimestamps = new Map();
-        this.metrics = {
-            totalTransactions: 0,
-            successfulTransactions: 0,
-            failedTransactions: 0,
-            averageLatency: 0,
-            pendingTransactions: 0,
-            chainHealth: new Map()
+    logTransaction(hash: string, type: string, metadata: Record<string, any> = {}) {
+        const log: TransactionLog = {
+            hash,
+            type,
+            timestamp: Date.now(),
+            metadata
         };
+        this.txLogs.push(log);
+        
+        // Emit appropriate alerts based on transaction type
+        this.checkTransactionAlert(log);
     }
 
-    addNetwork(chainId: number, provider: ethers.Provider): void {
-        this.providers.set(chainId, provider);
-        this.metrics.chainHealth.set(chainId, true);
-    }
-
-    async startMonitoring(): Promise<void> {
-        this.monitorChainHealth();
-        this.monitorTransactionMetrics();
-    }
-
-    private monitorChainHealth(): void {
-        setInterval(async () => {
-            for (const [chainId, provider] of this.providers) {
-                try {
-                    const blockNumber = await provider.getBlockNumber();
-                    const wasHealthy = this.metrics.chainHealth.get(chainId);
-                    this.metrics.chainHealth.set(chainId, true);
-
-                    if (!wasHealthy) {
-                        this.emitAlert({
-                            level: AlertLevel.INFO,
-                            message: `Chain ${chainId} recovered and is now responding`,
-                            timestamp: new Date()
-                        });
-                    }
-                } catch (error) {
-                    this.metrics.chainHealth.set(chainId, false);
-                    this.emitAlert({
-                        level: AlertLevel.ERROR,
-                        message: `Chain ${chainId} is not responding`,
-                        timestamp: new Date(),
-                        data: error
-                    });
+    private checkTransactionAlert(log: TransactionLog) {
+        // Alert on failed transactions
+        if (log.type.includes("FAILED")) {
+            this.createAlert({
+                level: AlertLevel.ERROR,
+                message: `Transaction ${log.type} failed`,
+                metadata: {
+                    txHash: log.hash,
+                    ...log.metadata
                 }
-            }
-        }, this.config.healthCheckInterval);
-    }
-
-    private monitorTransactionMetrics(): void {
-        setInterval(() => {
-            const now = Date.now();
-            for (const [txHash, timestamp] of this.transactionTimestamps) {
-                const latency = now - timestamp;
-                if (latency > this.config.alertThresholds.crossChainLatency) {
-                    this.emitAlert({
-                        level: AlertLevel.WARNING,
-                        message: `High latency detected for transaction ${txHash}`,
-                        timestamp: new Date(),
-                        data: { latency, threshold: this.config.alertThresholds.crossChainLatency }
-                    });
+            });
+        }
+        
+        // Alert on governance actions
+        if (log.type.startsWith("GOVERNANCE_")) {
+            this.createAlert({
+                level: AlertLevel.INFO,
+                message: `Governance action ${log.type} recorded`,
+                metadata: {
+                    txHash: log.hash,
+                    ...log.metadata
                 }
-            }
-        }, this.config.healthCheckInterval);
-    }
-
-    trackTransaction(txHash: string, sourceChainId: number, targetChainId: number): void {
-        this.transactionTimestamps.set(txHash, Date.now());
-        this.metrics.totalTransactions++;
-        this.metrics.pendingTransactions++;
-    }
-
-    confirmTransaction(txHash: string, success: boolean): void {
-        const startTime = this.transactionTimestamps.get(txHash);
-        if (startTime) {
-            const latency = Date.now() - startTime;
-            this.updateLatencyMetrics(latency);
-            this.transactionTimestamps.delete(txHash);
-        }
-
-        this.metrics.pendingTransactions--;
-        if (success) {
-            this.metrics.successfulTransactions++;
-        } else {
-            this.metrics.failedTransactions++;
-            this.checkErrorRate();
-        }
-    }
-
-    private updateLatencyMetrics(newLatency: number): void {
-        const totalCompleted = this.metrics.successfulTransactions + this.metrics.failedTransactions;
-        this.metrics.averageLatency = (
-            (this.metrics.averageLatency * totalCompleted + newLatency) / 
-            (totalCompleted + 1)
-        );
-    }
-
-    private checkErrorRate(): void {
-        const errorRate = (this.metrics.failedTransactions / this.metrics.totalTransactions) * 100;
-        if (errorRate > this.config.alertThresholds.errorRate) {
-            this.emitAlert({
-                level: AlertLevel.CRITICAL,
-                message: `High error rate detected: ${errorRate.toFixed(2)}%`,
-                timestamp: new Date(),
-                data: { errorRate, threshold: this.config.alertThresholds.errorRate }
             });
         }
     }
 
-    emitAlert(alert: Alert): void {
-        this.alertHistory.push(alert);
-        this.emit('alert', alert);
-    }
-
-    getMetrics(): BridgeMetrics {
-        return { ...this.metrics };
-    }
-
-    getAlertHistory(startTime?: Date, endTime?: Date): Alert[] {
-        if (!startTime && !endTime) return [...this.alertHistory];
+    logError(type: string, error: Error | unknown, metadata: Record<string, any> = {}) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
         
-        return this.alertHistory.filter(alert => {
-            const timestamp = alert.timestamp.getTime();
-            const isAfterStart = !startTime || timestamp >= startTime.getTime();
-            const isBeforeEnd = !endTime || timestamp <= endTime.getTime();
-            return isAfterStart && isBeforeEnd;
+        this.createAlert({
+            level: AlertLevel.ERROR,
+            message: `${type}: ${errorMessage}`,
+            metadata: {
+                error: errorMessage,
+                ...metadata
+            }
         });
     }
 
-    getHealthStatus(): {
-        lastCheckTime: Date;
-        activeNetworks: number[];
-        chainHealth: Map<number, boolean>;
-        metrics: BridgeMetrics;
-    } {
-        return {
-            lastCheckTime: this.lastHealthCheck,
-            activeNetworks: Array.from(this.providers.keys()),
-            chainHealth: new Map(this.metrics.chainHealth),
-            metrics: this.getMetrics()
+    createAlert(config: AlertConfig) {
+        const alert: Alert = {
+            ...config,
+            id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            timestamp: Date.now()
         };
+
+        this.alerts.push(alert);
+        this.notifyAlertCallbacks(alert);
+    }
+
+    addAlertCallback(callback: (alert: Alert) => Promise<void>) {
+        this.alertCallbacks.push(callback);
+    }
+
+    private async notifyAlertCallbacks(alert: Alert) {
+        await Promise.all(
+            this.alertCallbacks.map(callback => 
+                callback(alert).catch(err => 
+                    console.error("Alert callback failed:", err)
+                )
+            )
+        );
+
+        // Also call the alert's specific callback if provided
+        if (alert.callback) {
+            try {
+                await alert.callback(alert);
+            } catch (err) {
+                console.error("Alert-specific callback failed:", err);
+            }
+        }
+    }
+
+    // Query methods
+    getRecentTransactions(limit: number = 100): TransactionLog[] {
+        return [...this.txLogs]
+            .sort((a, b) => b.timestamp - a.timestamp)
+            .slice(0, limit);
+    }
+
+    getRecentAlerts(level?: AlertLevel, limit: number = 100): Alert[] {
+        return [...this.alerts]
+            .filter(alert => !level || alert.level === level)
+            .sort((a, b) => b.timestamp - a.timestamp)
+            .slice(0, limit);
+    }
+
+    // Cleanup old logs
+    cleanup(maxAge: number = 24 * 60 * 60 * 1000) { // Default 24 hours
+        const cutoff = Date.now() - maxAge;
+        this.txLogs = this.txLogs.filter(log => log.timestamp >= cutoff);
+        this.alerts = this.alerts.filter(alert => alert.timestamp >= cutoff);
     }
 }

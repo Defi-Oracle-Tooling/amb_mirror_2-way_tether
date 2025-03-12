@@ -3,13 +3,11 @@ pragma solidity ^0.8.19;
 
 import "../interfaces/IBridgeGovernance.sol";
 import "../core/BridgeErrors.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
-import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 contract BridgeGovernance is IBridgeGovernance, ReentrancyGuard, Pausable {
-    using ECDSA for bytes32;
-
     struct Transaction {
         address target;
         uint256 value;

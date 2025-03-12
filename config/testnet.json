@@ -1,0 +1,9 @@
+{
+    "initialAdmins": [],
+    "initialOperators": [],
+    "initialGuardians": [],
+    "requiredSignatures": 2,
+    "sourceChains": [5, 80001],
+    "targetChains": [5, 80001],
+    "verifyContracts": true
+}

@@ -1,3 +1,4 @@
+require('dotenv').config();
 import { ethers } from "ethers";
 import { BridgeConfig, ChainConfig, BridgeFeature, BridgeRole } from "../../src/admin-panel/types/BridgeAdmin";
 import { validateBridgeConfig } from "./validateConfig";
@@ -5,7 +6,7 @@ import { ContractFactory } from "ethers";
 
 export function loadConfig(environment: string): BridgeConfig {
     let config: BridgeConfig;
-    
+
     try {
         config = require(`../../config/${environment}.json`);
     } catch (err) {
@@ -49,13 +50,13 @@ export function generateTestnetConfig(
             chainId: 31337, // Hardhat's default chain ID
             name: "Local Testnet 1",
             isSupported: true,
-            rpcUrl: localRpcUrl
+            rpcUrl: process.env.LOCAL_RPC_URL || localRpcUrl
         },
         {
             chainId: 31338,
             name: "Local Testnet 2",
             isSupported: true,
-            rpcUrl: localRpcUrl.replace("8545", "8546") // Assuming second chain on different port
+            rpcUrl: process.env.LOCAL_RPC_URL_2 || localRpcUrl.replace("8545", "8546") // Assuming second chain on different port
         }
     ];
 

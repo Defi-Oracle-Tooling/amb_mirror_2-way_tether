@@ -1,0 +1,61 @@
+name: Deploy to Azure
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v2
+      with:
+        node-version: '16'
+
+    - name: Install dependencies
+      run: yarn install
+
+    - name: Set up .env file
+      run: |
+        echo "ETH_RPC_URL=${{ secrets.ETH_RPC_URL }}" >> .env
+        echo "POLYGON_RPC_URL=${{ secrets.POLYGON_RPC_URL }}" >> .env
+        echo "ARBITRUM_RPC_URL=${{ secrets.ARBITRUM_RPC_URL }}" >> .env
+        echo "OPTIMISM_RPC_URL=${{ secrets.OPTIMISM_RPC_URL }}" >> .env
+        echo "GOERLI_RPC_URL=${{ secrets.GOERLI_RPC_URL }}" >> .env
+        echo "MUMBAI_RPC_URL=${{ secrets.MUMBAI_RPC_URL }}" >> .env
+        echo "ETHERSCAN_API_KEY=${{ secrets.ETHERSCAN_API_KEY }}" >> .env
+        echo "POLYGONSCAN_API_KEY=${{ secrets.POLYGONSCAN_API_KEY }}" >> .env
+        echo "ARBISCAN_API_KEY=${{ secrets.ARBISCAN_API_KEY }}" >> .env
+        echo "OPTIMISTIC_ETHERSCAN_API_KEY=${{ secrets.OPTIMISTIC_ETHERSCAN_API_KEY }}" >> .env
+        echo "TESTNET_ADMINS=${{ secrets.TESTNET_ADMINS }}" >> .env
+        echo "TESTNET_OPERATORS=${{ secrets.TESTNET_OPERATORS }}" >> .env
+        echo "TESTNET_GUARDIANS=${{ secrets.TESTNET_GUARDIANS }}" >> .env
+        echo "MAINNET_ADMINS=${{ secrets.MAINNET_ADMINS }}" >> .env
+        echo "MAINNET_OPERATORS=${{ secrets.MAINNET_OPERATORS }}" >> .env
+        echo "MAINNET_GUARDIANS=${{ secrets.MAINNET_GUARDIANS }}" >> .env
+        echo "SLACK_WEBHOOK_URL=${{ secrets.SLACK_WEBHOOK_URL }}" >> .env
+        echo "EMAIL_WEBHOOK_URL=${{ secrets.EMAIL_WEBHOOK_URL }}" >> .env
+        echo "DEPLOY_ENV=${{ secrets.DEPLOY_ENV }}" >> .env
+        echo "HARDHAT_NETWORK=${{ secrets.HARDHAT_NETWORK }}" >> .env
+        echo "AZURE_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}" >> .env
+        echo "AZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}" >> .env
+        echo "AZURE_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }}" >> .env
+        echo "AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}" >> .env
+        echo "AZURE_RESOURCE_GROUP=${{ secrets.AZURE_RESOURCE_GROUP }}" >> .env
+        echo "AZURE_STORAGE_ACCOUNT=${{ secrets.AZURE_STORAGE_ACCOUNT }}" >> .env
+        echo "AZURE_CONTAINER_NAME=${{ secrets.AZURE_CONTAINER_NAME }}" >> .env
+
+    - name: Log in to Azure CLI
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Deploy contracts
+      run: |
+        npx hardhat run scripts/deploy/deploy.ts --network ${{ secrets.HARDHAT_NETWORK }}

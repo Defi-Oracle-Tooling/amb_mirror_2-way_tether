@@ -1,6 +1,7 @@
 import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+require('dotenv').config();
 
 function setupEnvironment() {
     // Create .env file with default configuration

@@ -1,266 +1,156 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.0;
 
-import "../interfaces/IBridgeGovernance.sol";
-import "../core/BridgeErrors.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+import "../interfaces/IBridgeGovernance.sol";
 
-contract BridgeGovernance is IBridgeGovernance, ReentrancyGuard, Pausable {
-    struct Transaction {
-        address target;
-        uint256 value;
-        bytes data;
+contract BridgeGovernance is IBridgeGovernance, AccessControl, Pausable, ReentrancyGuard {
+    // Constants for gas optimization
+    bytes32 private constant PROPOSER_ROLE = keccak256("PROPOSER_ROLE");
+    bytes32 private constant EXECUTOR_ROLE = keccak256("EXECUTOR_ROLE");
+    uint256 private constant VOTING_DELAY = 1 days;
+    uint256 private constant VOTING_PERIOD = 3 days;
+    uint256 private constant QUORUM_PERCENTAGE = 4; // 4%
+
+    // Packed struct for gas optimization
+    struct Proposal {
+        uint32 startBlock;
+        uint32 endBlock;
+        uint32 forVotes;
+        uint32 againstVotes;
         bool executed;
-        uint256 sigCount;
-        mapping(address => bool) signatures;
+        bool canceled;
+        mapping(address => bool) hasVoted;
     }
 
-    // State variables
-    mapping(bytes32 => Transaction) public transactions;
-    mapping(address => Role) public roles;
-    mapping(address => bool) public isAuthorizedSigner;
-    uint256 public threshold;
-    address[] public signers;
-
-    // Modifiers
-    modifier onlyRole(Role requiredRole) {
-        if (roles[msg.sender] < requiredRole) {
-            revert BridgeErrors.UnauthorizedRole(msg.sender, uint8(requiredRole));
-        }
-        _;
-    }
-
-    modifier onlySigner() {
-        if (!isAuthorizedSigner[msg.sender]) {
-            revert BridgeErrors.InvalidSignerUpdate(msg.sender, "Not authorized signer");
-        }
-        _;
-    }
-
-    modifier txExists(bytes32 txHash) {
-        if (transactions[txHash].target == address(0)) {
-            revert BridgeErrors.TransactionDoesNotExist(txHash);
-        }
-        _;
-    }
-
-    modifier notExecuted(bytes32 txHash) {
-        if (transactions[txHash].executed) {
-            revert BridgeErrors.TransactionAlreadyExecuted(txHash);
-        }
-        _;
-    }
+    mapping(bytes32 => Proposal) private _proposals;
+    mapping(address => uint256) private _votingPower;
 
     constructor() {
-        roles[msg.sender] = Role.ADMIN;
-        threshold = 1;
-        isAuthorizedSigner[msg.sender] = true;
-        signers.push(msg.sender);
+        _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _setupRole(PROPOSER_ROLE, msg.sender);
+        _setupRole(EXECUTOR_ROLE, msg.sender);
     }
 
-    function assignRole(address account, Role role) external override onlyRole(Role.ADMIN) {
-        if (account == address(0)) {
-            revert BridgeErrors.InvalidRoleAssignment(account, uint8(role));
-        }
-        if (role == Role.NONE) {
-            revert BridgeErrors.InvalidRoleAssignment(account, uint8(role));
-        }
+    // Optimized propose function
+    function propose(
+        address[] memory targets,
+        uint256[] memory values,
+        bytes[] memory calldatas,
+        string memory description
+    ) external whenNotPaused returns (bytes32) {
+        require(
+            hasRole(PROPOSER_ROLE, msg.sender),
+            "BridgeGovernance: must have proposer role"
+        );
         
-        roles[account] = role;
-        if (role >= Role.ADMIN) {
-            if (!isAuthorizedSigner[account]) {
-                isAuthorizedSigner[account] = true;
-                signers.push(account);
-            }
-        }
-        emit RoleAssigned(account, role);
-    }
+        require(
+            targets.length == values.length && targets.length == calldatas.length,
+            "BridgeGovernance: invalid proposal length"
+        );
 
-    function revokeRole(address account) external override onlyRole(Role.ADMIN) {
-        if (account == msg.sender) {
-            revert BridgeErrors.CannotRevokeOwnRole(account);
-        }
-        if (roles[account] == Role.NONE) {
-            revert BridgeErrors.InvalidRoleAssignment(account, uint8(Role.NONE));
-        }
+        bytes32 proposalId = keccak256(abi.encode(targets, values, calldatas, description));
+        Proposal storage proposal = _proposals[proposalId];
         
-        if (isAuthorizedSigner[account]) {
-            if (signers.length <= threshold) {
-                revert BridgeErrors.InvalidThresholdUpdate(
-                    threshold,
-                    threshold,
-                    signers.length - 1
-                );
-            }
-            isAuthorizedSigner[account] = false;
-            for (uint i = 0; i < signers.length; i++) {
-                if (signers[i] == account) {
-                    signers[i] = signers[signers.length - 1];
-                    signers.pop();
-                    break;
-                }
-            }
-        }
+        require(proposal.startBlock == 0, "BridgeGovernance: proposal already exists");
+
+        uint32 startBlock = uint32(block.number + (VOTING_DELAY / 12)); // Assuming 12-second blocks
         
-        roles[account] = Role.NONE;
-        emit RoleRevoked(account, Role.NONE);
+        proposal.startBlock = startBlock;
+        proposal.endBlock = uint32(startBlock + (VOTING_PERIOD / 12));
+
+        emit ProposalCreated(proposalId, msg.sender, targets, values, calldatas, description);
+        return proposalId;
     }
 
-    function addSigner(address signer) external override onlyRole(Role.ADMIN) {
-        if (isAuthorizedSigner[signer]) {
-            revert BridgeErrors.InvalidSignerUpdate(signer, "Already a signer");
+    // Gas-optimized voting function
+    function castVote(bytes32 proposalId, bool support) external whenNotPaused nonReentrant {
+        Proposal storage proposal = _proposals[proposalId];
+        
+        require(
+            block.number >= proposal.startBlock && block.number <= proposal.endBlock,
+            "BridgeGovernance: voting is closed"
+        );
+        require(!proposal.hasVoted[msg.sender], "BridgeGovernance: already voted");
+
+        uint256 voterPower = _votingPower[msg.sender];
+        require(voterPower > 0, "BridgeGovernance: no voting power");
+
+        proposal.hasVoted[msg.sender] = true;
+
+        if (support) {
+            proposal.forVotes += uint32(voterPower);
+        } else {
+            proposal.againstVotes += uint32(voterPower);
         }
-        isAuthorizedSigner[signer] = true;
-        signers.push(signer);
-        emit SignerAdded(signer);
+
+        emit VoteCast(msg.sender, proposalId, support, voterPower);
     }
 
-    function removeSigner(address signer) external override onlyRole(Role.ADMIN) {
-        if (!isAuthorizedSigner[signer]) {
-            revert BridgeErrors.InvalidSignerUpdate(signer, "Not a signer");
-        }
-        if (signers.length <= threshold) {
-            revert BridgeErrors.InvalidThresholdUpdate(
-                threshold,
-                threshold,
-                signers.length - 1
+    // Execute proposal with success verification
+    function execute(
+        address[] memory targets,
+        uint256[] memory values,
+        bytes[] memory calldatas,
+        bytes32 descriptionHash
+    ) external payable whenNotPaused nonReentrant returns (bytes32) {
+        require(
+            hasRole(EXECUTOR_ROLE, msg.sender),
+            "BridgeGovernance: must have executor role"
+        );
+
+        bytes32 proposalId = keccak256(abi.encode(targets, values, calldatas, descriptionHash));
+        Proposal storage proposal = _proposals[proposalId];
+
+        require(
+            block.number > proposal.endBlock,
+            "BridgeGovernance: voting is still open"
+        );
+        require(!proposal.executed, "BridgeGovernance: proposal already executed");
+        require(!proposal.canceled, "BridgeGovernance: proposal canceled");
+
+        // Check if proposal passed
+        uint256 totalVotes = proposal.forVotes + proposal.againstVotes;
+        require(
+            _isQuorumReached(totalVotes) && proposal.forVotes > proposal.againstVotes,
+            "BridgeGovernance: proposal not passed"
+        );
+
+        proposal.executed = true;
+
+        // Execute each action
+        for (uint256 i = 0; i < targets.length;) {
+            (bool success, bytes memory returndata) = targets[i].call{value: values[i]}(
+                calldatas[i]
             );
-        }
-        if (signer == msg.sender) {
-            revert BridgeErrors.InvalidSignerUpdate(signer, "Cannot remove self");
-        }
-        
-        isAuthorizedSigner[signer] = false;
-        for (uint i = 0; i < signers.length; i++) {
-            if (signers[i] == signer) {
-                signers[i] = signers[signers.length - 1];
-                signers.pop();
-                break;
-            }
-        }
-        emit SignerRemoved(signer);
-    }
-
-    function updateThreshold(uint256 newThreshold) external override onlyRole(Role.ADMIN) {
-        if (newThreshold == 0 || newThreshold > signers.length) {
-            revert BridgeErrors.InvalidThresholdUpdate(
-                threshold,
-                newThreshold,
-                signers.length
-            );
-        }
-        threshold = newThreshold;
-        emit ThresholdUpdated(newThreshold);
-    }
-
-    function proposeTransaction(
-        address target,
-        uint256 value,
-        bytes calldata data
-    ) external override onlySigner whenNotPaused returns (bytes32) {
-        if (target == address(0)) {
-            revert BridgeErrors.InvalidTransactionData(bytes32(0), "Invalid target");
-        }
-        
-        bytes32 txHash = keccak256(abi.encode(target, value, data));
-        if (transactions[txHash].target != address(0)) {
-            revert BridgeErrors.TransactionAlreadyProcessed(txHash);
+            require(success, string(returndata));
+            
+            unchecked { ++i; }
         }
 
-        Transaction storage transaction = transactions[txHash];
-        transaction.target = target;
-        transaction.value = value;
-        transaction.data = data;
-        transaction.sigCount = 0;
-        
-        emit TransactionProposed(txHash, msg.sender);
-        return txHash;
+        emit ProposalExecuted(proposalId);
+        return proposalId;
     }
 
-    function signTransaction(bytes32 txHash) 
-        external 
-        override 
-        onlySigner 
-        txExists(txHash) 
-        notExecuted(txHash)
-        whenNotPaused
-        nonReentrant
-    {
-        Transaction storage transaction = transactions[txHash];
-        if (transaction.signatures[msg.sender]) {
-            revert BridgeErrors.InvalidTransactionData(txHash, "Already signed");
-        }
-        
-        transaction.signatures[msg.sender] = true;
-        transaction.sigCount++;
-    }
-
-    function executeTransaction(bytes32 txHash) 
-        external 
-        override 
-        txExists(txHash) 
-        notExecuted(txHash)
-        whenNotPaused
-        nonReentrant
-    {
-        Transaction storage transaction = transactions[txHash];
-        if (transaction.sigCount < threshold) {
-            revert BridgeErrors.InsufficientSignatures(
-                txHash,
-                transaction.sigCount,
-                threshold
-            );
-        }
-
-        transaction.executed = true;
-        (bool success, bytes memory result) = transaction.target.call{value: transaction.value}(transaction.data);
-        if (!success) {
-            revert BridgeErrors.TransactionExecutionFailed(txHash, result);
-        }
-
-        emit TransactionExecuted(txHash);
-    }
-
-    function cancelTransaction(bytes32 txHash) 
-        external 
-        override 
-        txExists(txHash) 
-        notExecuted(txHash) 
-        onlyRole(Role.ADMIN) 
-    {
-        delete transactions[txHash];
-        emit TransactionCancelled(txHash);
-    }
-
-    function hasRole(address account, Role role) external view override returns (bool) {
-        return roles[account] >= role;
-    }
-
-    function getThreshold() external view override returns (uint256) {
-        return threshold;
-    }
-
-    function getSignatureCount(bytes32 txHash) external view override returns (uint256) {
-        return transactions[txHash].sigCount;
-    }
-
-    // Additional helper functions
-    function getSigners() external view returns (address[] memory) {
-        return signers;
-    }
-
-    function hasSignedTransaction(bytes32 txHash, address signer) external view returns (bool) {
-        return transactions[txHash].signatures[signer];
-    }
-
-    // Emergency controls
-    function pause() external onlyRole(Role.GUARDIAN) {
+    // Emergency functions
+    function pause() external {
+        require(hasRole(DEFAULT_ADMIN_ROLE, msg.sender), "BridgeGovernance: must be admin");
         _pause();
     }
 
-    function unpause() external onlyRole(Role.ADMIN) {
+    function unpause() external {
+        require(hasRole(DEFAULT_ADMIN_ROLE, msg.sender), "BridgeGovernance: must be admin");
         _unpause();
+    }
+
+    // Internal helper functions
+    function _isQuorumReached(uint256 totalVotes) internal pure returns (bool) {
+        return totalVotes >= _quorumVotes();
+    }
+
+    function _quorumVotes() internal pure returns (uint256) {
+        return (10000 * QUORUM_PERCENTAGE) / 100; // Base of 10000 for percentage
     }
 }

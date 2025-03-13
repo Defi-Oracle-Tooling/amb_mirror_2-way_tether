@@ -1,94 +1,73 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.0;
 
 library BridgeErrors {
-    // Role-based errors
-    error UnauthorizedRole(address account, uint8 requiredRole);
-    error InvalidRoleAssignment(address account, uint8 role);
-    error CannotRevokeOwnRole(address account);
+    // Access Control Errors
+    error UnauthorizedAccess(address caller, string required_role);
+    error InvalidAdmin(address caller);
+    error InvalidOperator(address caller);
+    error InvalidGuardian(address caller);
 
-    // Transaction-related errors
-    error TransactionAlreadyProcessed(bytes32 txHash);
-    error TransactionDoesNotExist(bytes32 txHash);
-    error TransactionAlreadyExecuted(bytes32 txHash);
-    error InsufficientSignatures(bytes32 txHash, uint256 current, uint256 required);
-    error InvalidTransactionData(bytes32 txHash, string reason);
-    error TransactionExecutionFailed(bytes32 txHash, bytes reason);
+    // Asset Related Errors
+    error UnsupportedAsset(address asset);
+    error InsufficientBalance(address asset, uint256 requested, uint256 available);
+    error InvalidAmount(uint256 amount);
+    error TransferFailed(address asset, address from, address to, uint256 amount);
+    error MintFailed(address asset, address to, uint256 amount);
+    error BurnFailed(address asset, address from, uint256 amount);
 
-    // Chain-related errors
-    error UnsupportedChain(uint256 chainId);
-    error InvalidSourceChain(uint256 chainId);
-    error InvalidTargetChain(uint256 chainId);
+    // Bridge Operation Errors
+    error InvalidProof(bytes proof);
+    error ProofAlreadyUsed(bytes32 proofHash);
+    error BridgeOperationFailed(string reason);
+    error InvalidDestinationChain(uint256 chainId);
+    error ExcessiveAmount(uint256 amount, uint256 limit);
+    error InvalidNonce(uint256 provided, uint256 expected);
 
-    // Configuration errors
-    error FeatureNotEnabled(string feature);
-    error InvalidThresholdUpdate(uint256 current, uint256 proposed, uint256 signers);
-    error InvalidSignerUpdate(address signer, string reason);
-    error InvalidGovernanceAddress(address provided);
+    // Governance Errors
+    error ProposalNotFound(bytes32 proposalId);
+    error ProposalAlreadyExecuted(bytes32 proposalId);
+    error ProposalNotReady(bytes32 proposalId, uint256 currentTime, uint256 executionTime);
+    error InvalidProposalParameters();
+    error TimelockNotExpired(uint256 remaining);
 
-    // System state errors
+    // System State Errors
     error SystemPaused();
-    error InvalidStateTransition(string current, string proposed);
+    error BridgeLocked();
+    error InvalidState(string expected, string actual);
 
-    // Helper functions to create standardized error messages
-    function getUnauthorizedRoleError(address account, uint8 requiredRole) internal pure returns (string memory) {
-        return string(abi.encodePacked(
-            "Account ", addressToString(account), 
-            " does not have required role ", uint8ToString(requiredRole)
-        ));
-    }
+    // Configuration Errors
+    error InvalidConfiguration(string parameter);
+    error InvalidThreshold(uint256 provided, uint256 min, uint256 max);
+    error InvalidAddress(address providedAddress);
+    error ZeroAddress();
 
-    function getTransactionError(bytes32 txHash, string memory reason) internal pure returns (string memory) {
-        return string(abi.encodePacked(
-            "Transaction ", bytes32ToString(txHash),
-            " error: ", reason
-        ));
-    }
+    // ERC Standards Errors
+    error ERC20TransferFailed(address token, address from, address to, uint256 amount);
+    error ERC721TransferFailed(address token, address from, address to, uint256 tokenId);
+    error ERC1155TransferFailed(address token, address from, address to, uint256 id, uint256 amount);
+    error ERC777TransferFailed(address token, address from, address to, uint256 amount);
+    error ERC4626DepositFailed(address vault, address asset, uint256 amount);
 
-    // Utility functions for error message formatting
-    function addressToString(address account) internal pure returns (string memory) {
-        bytes memory s = new bytes(40);
-        for (uint i = 0; i < 20; i++) {
-            bytes1 b = bytes1(uint8(uint(uint160(account)) / (2**(8*(19 - i)))));
-            bytes1 hi = bytes1(uint8(b) / 16);
-            bytes1 lo = bytes1(uint8(b) - 16 * uint8(hi));
-            s[2*i] = char(hi);
-            s[2*i+1] = char(lo);            
-        }
-        return string(abi.encodePacked("0x", string(s)));
-    }
-
-    function bytes32ToString(bytes32 value) internal pure returns (string memory) {
-        bytes memory s = new bytes(64);
-        for (uint i = 0; i < 32; i++) {
-            bytes1 b = bytes1(uint8(uint(value) / (2**(8*(31 - i)))));
-            bytes1 hi = bytes1(uint8(b) / 16);
-            bytes1 lo = bytes1(uint8(b) - 16 * uint8(hi));
-            s[2*i] = char(hi);
-            s[2*i+1] = char(lo);            
-        }
-        return string(abi.encodePacked("0x", string(s)));
-    }
-
-    function uint8ToString(uint8 value) internal pure returns (string memory) {
-        if (value == 0) return "0";
-        uint8 temp = value;
-        uint256 digits;
-        while (temp != 0) {
-            digits++;
-            temp /= 10;
-        }
-        bytes memory buffer = new bytes(digits);
-        while (value != 0) {
-            digits -= 1;
-            buffer[digits] = bytes1(uint8(48 + uint8(value % 10)));
-            value /= 10;
-        }
-        return string(buffer);
-    }
-
-    function char(bytes1 b) internal pure returns (bytes1) {
-        if (uint8(b) < 10) return bytes1(uint8(b) + 0x30);
-        else return bytes1(uint8(b) + 0x57);
+    // Event Emission for Monitoring
+    event ErrorLogged(
+        string indexed errorType,
+        string message,
+        address indexed actor,
+        uint256 timestamp
+    );
+    
+    // Logging function for monitoring
+    function logError(
+        string memory errorType,
+        string memory message,
+        address actor
+    ) internal {
+        emit ErrorLogged(
+            errorType,
+            message,
+            actor,
+            block.timestamp
+        );
     }
 }

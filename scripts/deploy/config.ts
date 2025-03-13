@@ -7,71 +7,65 @@ import { ContractFactory } from "ethers";
 export function loadConfig(environment: string): BridgeConfig {
     let config: BridgeConfig;
 
+    // Load environment specific config
     try {
         config = require(`../../config/${environment}.json`);
-    } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-        throw new Error(`Failed to load config for environment ${environment}: ${errorMessage}`);
+    } catch (error) {
+        throw new Error(`Failed to load config for environment: ${environment}`);
     }
 
-    // Validate the loaded configuration
+    // Validate config
     validateBridgeConfig(config);
     return config;
 }
 
 export function getDefaultFeatures(): BridgeFeature[] {
     return [
-        {
-            name: "CROSS_CHAIN_MIRROR",
-            enabled: false,
-            description: "Enables cross-chain transaction mirroring",
-            requiredRole: BridgeRole.OPERATOR
-        },
-        {
-            name: "EMERGENCY_SHUTDOWN",
-            enabled: false,
-            description: "Allows emergency shutdown of bridge operations",
-            requiredRole: BridgeRole.GUARDIAN
-        },
-        {
-            name: "ROLE_MANAGEMENT",
-            enabled: false,
-            description: "Enables role assignment and management",
-            requiredRole: BridgeRole.ADMIN
-        }
+        'CROSS_CHAIN_MIRROR',
+        'ERC20_BRIDGE',
+        'ERC721_BRIDGE',
+        'ERC1155_BRIDGE',
+        'ERC4626_BRIDGE',
+        'ERC777_BRIDGE'
     ];
 }
 
 export function generateTestnetConfig(
     localRpcUrl: string = "http://localhost:8545"
 ): BridgeConfig {
-    const testChains: ChainConfig[] = [
-        {
-            chainId: 31337, // Hardhat's default chain ID
-            name: "Local Testnet 1",
-            isSupported: true,
-            rpcUrl: process.env.LOCAL_RPC_URL || localRpcUrl
-        },
-        {
-            chainId: 31338,
-            name: "Local Testnet 2",
-            isSupported: true,
-            rpcUrl: process.env.LOCAL_RPC_URL_2 || localRpcUrl.replace("8545", "8546") // Assuming second chain on different port
-        }
-    ];
-
     return {
-        features: getDefaultFeatures(),
-        chains: testChains,
         governance: {
-            threshold: 1, // Single signature for testing
-            minDelay: 0, // No delay for testing
-            guardianDelay: 0
+            signatureThreshold: 2,
+            roles: [
+                { role: BridgeRole.ADMIN, id: 2 },
+                { role: BridgeRole.OPERATOR, id: 1 },
+                { role: BridgeRole.GUARDIAN, id: 3 }
+            ]
         },
+        chains: [
+            {
+                chainId: 1,
+                rpcUrl: localRpcUrl,
+                confirmations: 1,
+                features: getDefaultFeatures()
+            },
+            {
+                chainId: 2, 
+                rpcUrl: localRpcUrl,
+                confirmations: 1,
+                features: getDefaultFeatures()
+            }
+        ],
+        features: getDefaultFeatures(),
         monitoring: {
-            errorThreshold: 3,
-            alertInterval: 1000,
-            maxRetries: 3
+            alertThresholds: {
+                transactionDelay: 5000,
+                signatureDelay: 3000,
+                errorRate: 10,
+                blockConfirmations: 12,
+                crossChainLatency: 10000
+            },
+            healthCheckInterval: 1000
         }
     };
 }
@@ -83,49 +77,26 @@ export async function deployTestEnvironment(
     bridges: Map<number, string>,
     governance: Map<number, string>
 }> {
-    const deployments = {
-        bridges: new Map<number, string>(),
-        governance: new Map<number, string>()
-    };
+    const bridges = new Map<number, string>();
+    const governance = new Map<number, string>();
 
+    // Deploy contracts for each chain
     for (const chain of config.chains) {
-        // Deploy Governance using ContractFactory
-        const governanceFactory = new ContractFactory(
-            ["..."], // ABI will be loaded from artifacts
-            "...",   // Bytecode will be loaded from artifacts
-            deployer
-        );
-        const governance = await governanceFactory.deploy();
-        await governance.waitForDeployment();
-        const governanceAddress = await governance.getAddress();
+        const BridgeGovernance = await ethers.getContractFactory("BridgeGovernance", deployer);
+        const governanceContract = await BridgeGovernance.deploy();
+        await governanceContract.waitForDeployment();
+        governance.set(chain.chainId, await governanceContract.getAddress());
 
-        // Deploy Bridge with governance address
-        const bridgeFactory = new ContractFactory(
-            ["..."], // ABI will be loaded from artifacts
-            "...",   // Bytecode will be loaded from artifacts
-            deployer
-        );
-        const bridge = await bridgeFactory.deploy(governanceAddress);
-        await bridge.waitForDeployment();
-        const bridgeAddress = await bridge.getAddress();
+        const BridgeMirror = await ethers.getContractFactory("BridgeMirror", deployer);
+        const bridgeContract = await BridgeMirror.deploy(await governanceContract.getAddress());
+        await bridgeContract.waitForDeployment();
+        bridges.set(chain.chainId, await bridgeContract.getAddress());
 
-        deployments.bridges.set(chain.chainId, bridgeAddress);
-        deployments.governance.set(chain.chainId, governanceAddress);
-
-        // Initialize governance
-        const governanceContract = governanceFactory.attach(governanceAddress);
-        await governanceContract.updateThreshold(config.governance.threshold);
-
-        // Enable features
-        const bridgeContract = bridgeFactory.attach(bridgeAddress);
-        for (const feature of config.features) {
-            if (feature.enabled) {
-                await bridgeContract.toggleFeature(feature.name, true);
-            }
-        }
+        // Setup roles
+        await governanceContract.updateThreshold(config.governance.signatureThreshold);
     }
 
-    return deployments;
+    return { bridges, governance };
 }
 
 export async function setupCrossChainConnections(
@@ -136,25 +107,23 @@ export async function setupCrossChainConnections(
     },
     deployer: ethers.Signer
 ): Promise<void> {
-    const bridgeFactory = new ContractFactory(
-        ["..."], // ABI will be loaded from artifacts
-        "...",   // Bytecode will be loaded from artifacts
-        deployer
-    );
+    const BridgeGovernance = await ethers.getContractFactory("BridgeGovernance", deployer);
 
-    for (const sourceChain of config.chains) {
-        const bridgeAddress = deployments.bridges.get(sourceChain.chainId);
-        if (!bridgeAddress) continue;
+    // Setup cross-chain connections for each chain
+    for (const chain of config.chains) {
+        const governanceContract = BridgeGovernance.attach(deployments.governance.get(chain.chainId) || '');
 
-        const bridge = bridgeFactory.attach(bridgeAddress);
+        // Enable features
+        for (const feature of chain.features) {
+            await governanceContract.connect(deployer).toggleFeature(feature, true);
+        }
 
-        // Enable connections to all other chains
-        for (const targetChain of config.chains) {
-            if (targetChain.chainId !== sourceChain.chainId) {
-                await bridge.updateSupportedChain(
-                    targetChain.chainId,
-                    targetChain.isSupported
-                );
+        // Setup roles for each chain
+        for (const roleConfig of config.governance.roles) {
+            // Get admin addresses from environment or config
+            const adminAddresses = [await deployer.getAddress()]; // Add more addresses as needed
+            for (const adminAddress of adminAddresses) {
+                await governanceContract.connect(deployer).assignRole(adminAddress, roleConfig.id);
             }
         }
     }

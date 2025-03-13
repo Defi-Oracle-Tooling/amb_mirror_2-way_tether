@@ -200,4 +200,114 @@ describe("Bridge Monitoring Integration", function () {
             monitoringService.removeAllListeners();
         });
     });
+
+    describe("Performance Monitoring", function () {
+        it("Should track and alert on transaction throughput", async function () {
+            const alerts: any[] = [];
+            monitoringService.on('alert', (alert) => alerts.push(alert));
+
+            // Generate test transactions
+            const numTransactions = 10;
+            const transactions = [];
+
+            for (let i = 0; i < numTransactions; i++) {
+                const txHash = ethers.utils.formatBytes32String(`perf_tx_${i}`);
+                transactions.push(txHash);
+                monitoringService.trackTransaction(txHash, 1, 2);
+            }
+
+            // Complete transactions with varying latencies
+            for (const txHash of transactions) {
+                await new Promise(resolve => setTimeout(resolve, Math.random() * 1000));
+                monitoringService.confirmTransaction(txHash, true);
+            }
+
+            const metrics = monitoringService.getMetrics();
+            expect(metrics.totalTransactions).to.equal(numTransactions);
+            expect(metrics.averageLatency).to.be.gt(0);
+        });
+
+        it("Should handle concurrent transactions correctly", async function () {
+            const concurrentTxCount = 5;
+            const txPromises = [];
+
+            for (let i = 0; i < concurrentTxCount; i++) {
+                const testData = ethers.utils.defaultAbiCoder.encode(
+                    ["string", "uint256"],
+                    [`concurrent_tx_${i}`, i]
+                );
+
+                txPromises.push(
+                    sourceBridgeService.proposeTransaction(
+                        targetChainBridge.address,
+                        2,
+                        testData
+                    )
+                );
+            }
+
+            const txHashes = await Promise.all(txPromises);
+            expect(txHashes.length).to.equal(concurrentTxCount);
+
+            // Verify all transactions are being tracked
+            const metrics = monitoringService.getMetrics();
+            expect(metrics.totalTransactions).to.be.gte(concurrentTxCount);
+        });
+
+        it("Should track throughput metrics accurately", async function () {
+            const alerts: any[] = [];
+            monitoringService.on('alert', (alert) => alerts.push(alert));
+
+            // Clear any existing metrics
+            const initialMetrics = monitoringService.getMetrics();
+            
+            // Simulate burst of transactions
+            const burstSize = 20;
+            const transactions = [];
+
+            // Create transactions in quick succession
+            for (let i = 0; i < burstSize; i++) {
+                const txHash = ethers.utils.formatBytes32String(`burst_tx_${i}`);
+                transactions.push(txHash);
+                monitoringService.trackTransaction(txHash, 1, 2);
+                await new Promise(resolve => setTimeout(resolve, 50)); // Small delay between transactions
+            }
+
+            // Complete transactions
+            for (const txHash of transactions) {
+                monitoringService.confirmTransaction(txHash, true);
+            }
+
+            const finalMetrics = monitoringService.getMetrics();
+            expect(finalMetrics.lastMinuteTransactions).to.equal(burstSize);
+            expect(finalMetrics.throughput).to.be.gt(0);
+            expect(finalMetrics.peakThroughput).to.be.gt(0);
+            
+            // Verify performance degradation alerts
+            const hasPerformanceAlert = alerts.some(a => 
+                a.level === AlertLevel.WARNING && 
+                a.message.includes('Performance degradation')
+            );
+            expect(hasPerformanceAlert).to.be.true;
+        });
+
+        it("Should maintain accurate metrics over time", async function () {
+            // Track metrics over a longer period
+            const metrics1 = monitoringService.getMetrics();
+            
+            // Wait for a minute
+            await new Promise(resolve => setTimeout(resolve, 61000));
+            
+            const metrics2 = monitoringService.getMetrics();
+            
+            // Verify lastMinuteTransactions has been reset
+            expect(metrics2.lastMinuteTransactions).to.equal(0);
+            
+            // But total transactions should remain unchanged
+            expect(metrics2.totalTransactions).to.equal(metrics1.totalTransactions);
+            
+            // Peak throughput should persist
+            expect(metrics2.peakThroughput).to.equal(metrics1.peakThroughput);
+        });
+    });
 });
